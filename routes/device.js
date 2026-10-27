@@ -4,8 +4,6 @@ const pool = require('../db');
 const { verifyDevice } = require('../middleware/auth');
 const { endSession } = require('../utils/endSession');
 
-// If current stays below this for FULL_CHARGE_SUSTAIN_SECONDS, we treat the battery as full.
-// EV/Li-ion charging naturally tapers current to near-zero as it approaches 100% (CC-CV charging).
 const LOW_CURRENT_THRESHOLD_A = 0.05; // 50 mA
 const FULL_CHARGE_SUSTAIN_SECONDS = 45;
 
@@ -34,7 +32,6 @@ router.post('/telemetry', verifyDevice, async (req, res) => {
         [voltage, current, power, energy_kwh || 0, session.id]
       );
 
-      // --- Full-charge detection ---
       const isLowCurrent = current != null && current < LOW_CURRENT_THRESHOLD_A;
 
       if (isLowCurrent) {
@@ -47,7 +44,6 @@ router.post('/telemetry', verifyDevice, async (req, res) => {
           }
         }
       } else if (session.low_current_since) {
-        // Current came back up - reset the taper timer
         await pool.query('UPDATE sessions SET low_current_since = NULL WHERE id = ?', [session.id]);
       }
     }
@@ -69,7 +65,7 @@ router.get('/command', verifyDevice, async (req, res) => {
     );
 
     if (activeSessions.length === 0) {
-      return res.json({ shouldCharge: false });
+      return res.json({ shouldCharge: false, amountPaid: 0 });
     }
 
     const session = activeSessions[0];
@@ -78,25 +74,14 @@ router.get('/command', verifyDevice, async (req, res) => {
 
     if (now >= endTime) {
       await endSession(session.id, 'time_up');
-      return res.json({ shouldCharge: false });
+      return res.json({ shouldCharge: false, amountPaid: 0 });
     }
 
-    // Amount the user paid for this session (uses the first column name that exists)
-    const amount =
-      session.amount ??
-      session.amount_paid ??
-      session.total_amount ??
-      session.total_cost ??
-      session.cost ??
-      session.price;
-
-    const reply = {
+    res.json({
       shouldCharge: true,
       secondsRemaining: Math.floor((endTime - now) / 1000),
-    };
-    if (amount != null) reply.amount = Number(amount);
-
-    res.json(reply);
+      amountPaid: Number(session.amount_paid),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch command' });
